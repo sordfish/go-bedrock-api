@@ -2,7 +2,7 @@
 set -e
 
 echo "Updating apk and installing dependencies..."
-apk update && apk add --no-cache go git bash curl
+apk update && apk add --no-cache git
 
 echo "Cloning repository..."
 git clone https://github.com/sordfish/go-bedrock-api.git /app
