@@ -27,7 +27,18 @@ type ActiveAddon struct {
 	Version []int  `json:"version"`
 }
 
-// writeJSONError writes an error response as JSON.
+// ManifestHeader represents the header section of a manifest.json.
+type ManifestHeader struct {
+	UUID    string `json:"uuid"`
+	Version []int  `json:"version"`
+}
+
+// Manifest represents the structure of a manifest.json file.
+type Manifest struct {
+	Header ManifestHeader `json:"header"`
+}
+
+// writeJSONError sends an error response in JSON format.
 func writeJSONError(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -35,7 +46,7 @@ func writeJSONError(w http.ResponseWriter, code int, message string) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// writeJSONResponse writes a successful response as JSON.
+// writeJSONResponse sends a successful response in JSON format.
 func writeJSONResponse(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -52,7 +63,6 @@ func getWorldFolder() (string, error) {
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Skip comments and empty lines.
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -63,7 +73,6 @@ func getWorldFolder() (string, error) {
 				if levelName == "" {
 					return "", fmt.Errorf("level-name is empty in server.properties")
 				}
-				// Construct the world folder path.
 				return filepath.Join("/data/worlds", levelName), nil
 			}
 		}
@@ -71,13 +80,12 @@ func getWorldFolder() (string, error) {
 	return "", fmt.Errorf("level-name not found in %s", serverPropsPath)
 }
 
-// sendCommandHandler reads the command from the POST body and writes it to the FIFO.
+// sendCommandHandler reads a command from the POST body and writes it to the FIFO.
 func sendCommandHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
-
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("Error reading request body: %v", err)
@@ -85,13 +93,11 @@ func sendCommandHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-
 	command := strings.TrimSpace(string(body))
 	if command == "" {
 		writeJSONError(w, http.StatusBadRequest, "Empty command")
 		return
 	}
-
 	fifo, err := os.OpenFile(fifoPath, os.O_WRONLY, 0)
 	if err != nil {
 		log.Printf("Error opening FIFO file: %v", err)
@@ -99,14 +105,12 @@ func sendCommandHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer fifo.Close()
-
 	_, err = fifo.Write([]byte(command + "\n"))
 	if err != nil {
 		log.Printf("Error writing to FIFO: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
-
 	log.Printf("Command sent: %s", command)
 	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Command sent successfully"})
 }
@@ -151,13 +155,11 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
-
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "File too big")
 		return
 	}
-
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		log.Printf("Error retrieving file from form: %v", err)
@@ -165,7 +167,6 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-
 	tmpFile, err := ioutil.TempFile("", "upload-*.mcaddon")
 	if err != nil {
 		log.Printf("Error creating temp file: %v", err)
@@ -185,7 +186,6 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpFile.Close()
-
 	zipReader, err := zip.OpenReader(tmpFile.Name())
 	if err != nil {
 		log.Printf("Error opening zip archive: %v", err)
@@ -193,7 +193,6 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer zipReader.Close()
-
 	extractDir, err := ioutil.TempDir("", "mcaddon-extract")
 	if err != nil {
 		log.Printf("Error creating temporary extraction directory: %v", err)
@@ -201,10 +200,8 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.RemoveAll(extractDir)
-
 	for _, f := range zipReader.File {
 		fpath := filepath.Join(extractDir, f.Name)
-		// Security check to avoid ZipSlip vulnerability.
 		if !strings.HasPrefix(fpath, filepath.Clean(extractDir)+string(os.PathSeparator)) {
 			log.Printf("illegal file path: %s", fpath)
 			continue
@@ -236,11 +233,9 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 	}
-
 	// Assume the extracted archive contains two folders at its root: "behavior" and "resource".
 	behaviorSrc := filepath.Join(extractDir, "behavior")
 	resourceSrc := filepath.Join(extractDir, "resource")
-
 	if dirExists(behaviorSrc) {
 		err = copyDir(behaviorSrc, behaviorPacksDir)
 		if err != nil {
@@ -257,7 +252,6 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "mcaddon processed and installed successfully"})
 }
 
@@ -298,7 +292,36 @@ func copyDir(src string, dst string) error {
 	})
 }
 
-// getActiveAddons reads a JSON file containing an array of ActiveAddon and verifies existence in packDir.
+// getInstalledAddons scans all directories in packDir, reads the manifest.json (if available),
+// and returns a map of manifest UUIDs to their directory paths.
+func getInstalledAddons(packDir string) (map[string]string, error) {
+	installed := make(map[string]string)
+	dirs, err := ioutil.ReadDir(packDir)
+	if err != nil {
+		return installed, err
+	}
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		manifestPath := filepath.Join(packDir, dir.Name(), "manifest.json")
+		data, err := ioutil.ReadFile(manifestPath)
+		if err != nil {
+			log.Printf("Could not read manifest.json in %s: %v", dir.Name(), err)
+			continue
+		}
+		var manifest Manifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			log.Printf("Error parsing manifest.json in %s: %v", dir.Name(), err)
+			continue
+		}
+		installed[manifest.Header.UUID] = filepath.Join(packDir, dir.Name())
+	}
+	return installed, nil
+}
+
+// getActiveAddons reads the world JSON file containing an array of ActiveAddon,
+// then checks each addon against installed addons (by scanning manifest.json files in packDir).
 func getActiveAddons(jsonPath, packDir string) ([]ActiveAddon, error) {
 	data, err := ioutil.ReadFile(jsonPath)
 	if err != nil {
@@ -308,21 +331,24 @@ func getActiveAddons(jsonPath, packDir string) ([]ActiveAddon, error) {
 	if err := json.Unmarshal(data, &addons); err != nil {
 		return nil, err
 	}
+	installed, err := getInstalledAddons(packDir)
+	if err != nil {
+		return nil, err
+	}
 	validAddons := []ActiveAddon{}
 	for _, addon := range addons {
-		addonPath := filepath.Join(packDir, addon.PackID)
-		if info, err := os.Stat(addonPath); err == nil && info.IsDir() {
+		if _, found := installed[addon.PackID]; found {
 			validAddons = append(validAddons, addon)
 		} else {
-			log.Printf("Addon folder for pack_id %s not found in %s", addon.PackID, packDir)
+			log.Printf("Installed addon not found for pack_id: %s", addon.PackID)
 		}
 	}
 	return validAddons, nil
 }
 
 // activeAddonsHandler reads the active addons JSON files from the world folder,
-// then checks for matching addon directories in the corresponding packs directories.
-// It checks for both American ("behavior") and British ("behaviour") spellings.
+// then matches installed addons by scanning each pack's manifest.json in the corresponding packs directories.
+// It supports both "behavior" and "behaviour" spellings for the behavior packs JSON file.
 // If the required JSON files are missing, it returns a 404.
 func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	worldFolder, err := getWorldFolder()
@@ -331,8 +357,7 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "Error determining world folder")
 		return
 	}
-
-	// Check for both "behavior" and "behaviour" variants.
+	// Check for both American and British spellings.
 	behaviorJSON1 := filepath.Join(worldFolder, "world_behavior_packs.json")
 	behaviorJSON2 := filepath.Join(worldFolder, "world_behaviour_packs.json")
 	var behaviorJSON string
@@ -344,14 +369,11 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "world_behavior_packs.json not found")
 		return
 	}
-
-	// For resource packs, we expect the file name to be consistent.
 	resourceJSON := filepath.Join(worldFolder, "world_resource_packs.json")
 	if _, err := os.Stat(resourceJSON); os.IsNotExist(err) {
 		writeJSONError(w, http.StatusNotFound, "world_resource_packs.json not found")
 		return
 	}
-
 	behaviorAddons, err := getActiveAddons(behaviorJSON, behaviorPacksDir)
 	if err != nil {
 		log.Printf("Error reading active behavior addons: %v", err)
@@ -364,7 +386,6 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "Error reading active resource addons")
 		return
 	}
-
 	result := map[string]interface{}{
 		"active_behavior_addons": behaviorAddons,
 		"active_resource_addons": resourceAddons,
