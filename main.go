@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -16,14 +17,43 @@ const (
 	fifoPath               = "/shared/command_fifo"
 	behaviorPacksDir       = "/data/behavior_packs"
 	resourcePacksDir       = "/data/resource_packs"
-	worldFolder            = "/data/worlds/Bedrock level"
+	serverPropsPath        = "/data/server.properties"
 	maxUploadSize    int64 = 10 << 20 // 10 MB
 )
 
-// ActiveAddon represents the structure found in the world JSON files.
+// ActiveAddon represents an entry in the world JSON files.
 type ActiveAddon struct {
 	PackID  string `json:"pack_id"`
 	Version []int  `json:"version"`
+}
+
+// getWorldFolder reads /data/server.properties, extracts the level-name value,
+// and returns the world folder path as "/data/worlds/<level-name>".
+func getWorldFolder() (string, error) {
+	data, err := ioutil.ReadFile(serverPropsPath)
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip comments and empty lines.
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "level-name=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				levelName := strings.TrimSpace(parts[1])
+				if levelName == "" {
+					return "", fmt.Errorf("level-name is empty in server.properties")
+				}
+				// Construct the world folder path.
+				return filepath.Join("/data/worlds", levelName), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("level-name not found in %s", serverPropsPath)
 }
 
 // sendCommandHandler reads the command from the POST body and writes it to the FIFO.
@@ -161,6 +191,7 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 
 	for _, f := range zipReader.File {
 		fpath := filepath.Join(extractDir, f.Name)
+		// Security check to avoid ZipSlip vulnerability.
 		if !strings.HasPrefix(fpath, filepath.Clean(extractDir)+string(os.PathSeparator)) {
 			log.Printf("illegal file path: %s", fpath)
 			continue
@@ -193,7 +224,7 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Assume extracted archive contains two folders at its root: "behavior" and "resource"
+	// Assume the extracted archive contains two folders at its root: "behavior" and "resource".
 	behaviorSrc := filepath.Join(extractDir, "behavior")
 	resourceSrc := filepath.Join(extractDir, "resource")
 
@@ -226,6 +257,7 @@ func dirExists(path string) bool {
 	return info.IsDir()
 }
 
+// copyDir recursively copies a directory tree from src to dst.
 func copyDir(src string, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -279,6 +311,12 @@ func getActiveAddons(jsonPath, packDir string) ([]ActiveAddon, error) {
 // activeAddonsHandler reads the active addons JSON files from the world folder,
 // then checks for matching addon directories in the corresponding packs directories.
 func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
+	worldFolder, err := getWorldFolder()
+	if err != nil {
+		log.Printf("Error getting world folder: %v", err)
+		http.Error(w, "Error determining world folder", http.StatusInternalServerError)
+		return
+	}
 	behaviorJSON := filepath.Join(worldFolder, "world_behavior_packs.json")
 	resourceJSON := filepath.Join(worldFolder, "world_resource_packs.json")
 
