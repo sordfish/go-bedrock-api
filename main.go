@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	fifoPath         = "/shared/command_fifo"
-	behaviorPacksDir = "/data/behavior_packs"
-	resourcePacksDir = "/data/resource_packs"
-	serverPropsPath  = "/data/server.properties"
+	fifoPath               = "/shared/command_fifo"
+	behaviorPacksDir       = "/data/behavior_packs"
+	resourcePacksDir       = "/data/resource_packs"
+	serverPropsPath        = "/data/server.properties"
 	maxUploadSize    int64 = 10 << 20 // 10 MB
 )
 
@@ -322,7 +322,8 @@ func getActiveAddons(jsonPath, packDir string) ([]ActiveAddon, error) {
 
 // activeAddonsHandler reads the active addons JSON files from the world folder,
 // then checks for matching addon directories in the corresponding packs directories.
-// If either JSON file is missing, it returns a 404.
+// It checks for both American ("behavior") and British ("behaviour") spellings.
+// If the required JSON files are missing, it returns a 404.
 func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	worldFolder, err := getWorldFolder()
 	if err != nil {
@@ -331,13 +332,21 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	behaviorJSON := filepath.Join(worldFolder, "world_behavior_packs.json")
-	resourceJSON := filepath.Join(worldFolder, "world_resource_packs.json")
-
-	if _, err := os.Stat(behaviorJSON); os.IsNotExist(err) {
+	// Check for both "behavior" and "behaviour" variants.
+	behaviorJSON1 := filepath.Join(worldFolder, "world_behavior_packs.json")
+	behaviorJSON2 := filepath.Join(worldFolder, "world_behaviour_packs.json")
+	var behaviorJSON string
+	if _, err := os.Stat(behaviorJSON1); err == nil {
+		behaviorJSON = behaviorJSON1
+	} else if _, err := os.Stat(behaviorJSON2); err == nil {
+		behaviorJSON = behaviorJSON2
+	} else {
 		writeJSONError(w, http.StatusNotFound, "world_behavior_packs.json not found")
 		return
 	}
+
+	// For resource packs, we expect the file name to be consistent.
+	resourceJSON := filepath.Join(worldFolder, "world_resource_packs.json")
 	if _, err := os.Stat(resourceJSON); os.IsNotExist(err) {
 		writeJSONError(w, http.StatusNotFound, "world_resource_packs.json not found")
 		return
