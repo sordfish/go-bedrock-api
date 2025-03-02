@@ -14,17 +14,32 @@ import (
 )
 
 const (
-	fifoPath                = "/shared/command_fifo"
-	behaviourPacksDir       = "/data/behaviour_packs"
-	resourcePacksDir        = "/data/resource_packs"
-	serverPropsPath         = "/data/server.properties"
-	maxUploadSize     int64 = 10 << 20 // 10 MB
+	fifoPath         = "/shared/command_fifo"
+	behaviorPacksDir = "/data/behavior_packs"
+	resourcePacksDir = "/data/resource_packs"
+	serverPropsPath  = "/data/server.properties"
+	maxUploadSize    int64 = 10 << 20 // 10 MB
 )
 
 // ActiveAddon represents an entry in the world JSON files.
 type ActiveAddon struct {
 	PackID  string `json:"pack_id"`
 	Version []int  `json:"version"`
+}
+
+// writeJSONError writes an error response as JSON.
+func writeJSONError(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	resp := map[string]string{"error": message}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// writeJSONResponse writes a successful response as JSON.
+func writeJSONResponse(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(payload)
 }
 
 // getWorldFolder reads /data/server.properties, extracts the level-name value,
@@ -59,28 +74,28 @@ func getWorldFolder() (string, error) {
 // sendCommandHandler reads the command from the POST body and writes it to the FIFO.
 func sendCommandHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
 
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		log.Printf("Error reading request body: %v", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Bad Request")
 		return
 	}
 	defer r.Body.Close()
 
 	command := strings.TrimSpace(string(body))
 	if command == "" {
-		http.Error(w, "Empty command", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Empty command")
 		return
 	}
 
 	fifo, err := os.OpenFile(fifoPath, os.O_WRONLY, 0)
 	if err != nil {
 		log.Printf("Error opening FIFO file: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 	defer fifo.Close()
@@ -88,33 +103,31 @@ func sendCommandHandler(w http.ResponseWriter, r *http.Request) {
 	_, err = fifo.Write([]byte(command + "\n"))
 	if err != nil {
 		log.Printf("Error writing to FIFO: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
 	log.Printf("Command sent: %s", command)
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Command sent successfully"))
+	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Command sent successfully"})
 }
 
-// listAddonsHandler lists directories in the behaviour and resource packs directories.
+// listAddonsHandler lists directories in the behavior and resource packs directories.
 func listAddonsHandler(w http.ResponseWriter, r *http.Request) {
-	behaviourAddons, err := listDirectories(behaviourPacksDir)
+	behaviorAddons, err := listDirectories(behaviorPacksDir)
 	if err != nil {
-		http.Error(w, "Failed to list behaviour packs", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Failed to list behavior packs")
 		return
 	}
 	resourceAddons, err := listDirectories(resourcePacksDir)
 	if err != nil {
-		http.Error(w, "Failed to list resource packs", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Failed to list resource packs")
 		return
 	}
 	result := map[string][]string{
-		"behaviour_packs": behaviourAddons,
-		"resource_packs":  resourceAddons,
+		"behavior_packs": behaviorAddons,
+		"resource_packs": resourceAddons,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSONResponse(w, http.StatusOK, result)
 }
 
 func listDirectories(dir string) ([]string, error) {
@@ -132,23 +145,23 @@ func listDirectories(dir string) ([]string, error) {
 }
 
 // uploadMcAddonHandler accepts an mcaddon file upload, extracts it,
-// and copies the behaviour and resource packs to the appropriate folders.
+// and copies the behavior and resource packs to the appropriate folders.
 func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-		http.Error(w, "File too big", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "File too big")
 		return
 	}
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		log.Printf("Error retrieving file from form: %v", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Bad Request")
 		return
 	}
 	defer file.Close()
@@ -156,19 +169,19 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 	tmpFile, err := ioutil.TempFile("", "upload-*.mcaddon")
 	if err != nil {
 		log.Printf("Error creating temp file: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 	defer os.Remove(tmpFile.Name())
 	data, err := ioutil.ReadAll(file)
 	if err != nil {
 		log.Printf("Error reading uploaded file: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 	if _, err = tmpFile.Write(data); err != nil {
 		log.Printf("Error writing to temp file: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 	tmpFile.Close()
@@ -176,7 +189,7 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 	zipReader, err := zip.OpenReader(tmpFile.Name())
 	if err != nil {
 		log.Printf("Error opening zip archive: %v", err)
-		http.Error(w, "Invalid mcaddon file", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Invalid mcaddon file")
 		return
 	}
 	defer zipReader.Close()
@@ -184,7 +197,7 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 	extractDir, err := ioutil.TempDir("", "mcaddon-extract")
 	if err != nil {
 		log.Printf("Error creating temporary extraction directory: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 	defer os.RemoveAll(extractDir)
@@ -224,15 +237,15 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Assume the extracted archive contains two folders at its root: "behaviour" and "resource".
-	behaviourSrc := filepath.Join(extractDir, "behaviour")
+	// Assume the extracted archive contains two folders at its root: "behavior" and "resource".
+	behaviorSrc := filepath.Join(extractDir, "behavior")
 	resourceSrc := filepath.Join(extractDir, "resource")
 
-	if dirExists(behaviourSrc) {
-		err = copyDir(behaviourSrc, behaviourPacksDir)
+	if dirExists(behaviorSrc) {
+		err = copyDir(behaviorSrc, behaviorPacksDir)
 		if err != nil {
-			log.Printf("Error copying behaviour pack: %v", err)
-			http.Error(w, "Failed to install behaviour pack", http.StatusInternalServerError)
+			log.Printf("Error copying behavior pack: %v", err)
+			writeJSONError(w, http.StatusInternalServerError, "Failed to install behavior pack")
 			return
 		}
 	}
@@ -240,13 +253,12 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		err = copyDir(resourceSrc, resourcePacksDir)
 		if err != nil {
 			log.Printf("Error copying resource pack: %v", err)
-			http.Error(w, "Failed to install resource pack", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "Failed to install resource pack")
 			return
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("mcaddon processed and installed successfully"))
+	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "mcaddon processed and installed successfully"})
 }
 
 func dirExists(path string) bool {
@@ -315,41 +327,40 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	worldFolder, err := getWorldFolder()
 	if err != nil {
 		log.Printf("Error getting world folder: %v", err)
-		http.Error(w, "Error determining world folder", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Error determining world folder")
 		return
 	}
 
-	behaviourJSON := filepath.Join(worldFolder, "world_behaviour_packs.json")
+	behaviorJSON := filepath.Join(worldFolder, "world_behavior_packs.json")
 	resourceJSON := filepath.Join(worldFolder, "world_resource_packs.json")
 
-	if _, err := os.Stat(behaviourJSON); os.IsNotExist(err) {
-		http.Error(w, "world_behaviour_packs.json not found", http.StatusNotFound)
+	if _, err := os.Stat(behaviorJSON); os.IsNotExist(err) {
+		writeJSONError(w, http.StatusNotFound, "world_behavior_packs.json not found")
 		return
 	}
 	if _, err := os.Stat(resourceJSON); os.IsNotExist(err) {
-		http.Error(w, "world_resource_packs.json not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "world_resource_packs.json not found")
 		return
 	}
 
-	behaviourAddons, err := getActiveAddons(behaviourJSON, behaviourPacksDir)
+	behaviorAddons, err := getActiveAddons(behaviorJSON, behaviorPacksDir)
 	if err != nil {
-		log.Printf("Error reading active behaviour addons: %v", err)
-		http.Error(w, "Error reading active behaviour addons", http.StatusInternalServerError)
+		log.Printf("Error reading active behavior addons: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "Error reading active behavior addons")
 		return
 	}
 	resourceAddons, err := getActiveAddons(resourceJSON, resourcePacksDir)
 	if err != nil {
 		log.Printf("Error reading active resource addons: %v", err)
-		http.Error(w, "Error reading active resource addons", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "Error reading active resource addons")
 		return
 	}
 
 	result := map[string]interface{}{
-		"active_behaviour_addons": behaviourAddons,
-		"active_resource_addons":  resourceAddons,
+		"active_behavior_addons": behaviorAddons,
+		"active_resource_addons": resourceAddons,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSONResponse(w, http.StatusOK, result)
 }
 
 func main() {
