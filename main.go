@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	fifoPath               = "/shared/command_fifo"
-	behaviorPacksDir       = "/data/behavior_packs"
-	resourcePacksDir       = "/data/resource_packs"
-	serverPropsPath        = "/data/server.properties"
-	maxUploadSize    int64 = 10 << 20 // 10 MB
+	fifoPath                = "/shared/command_fifo"
+	behaviourPacksDir       = "/data/behaviour_packs"
+	resourcePacksDir        = "/data/resource_packs"
+	serverPropsPath         = "/data/server.properties"
+	maxUploadSize     int64 = 10 << 20 // 10 MB
 )
 
 // ActiveAddon represents an entry in the world JSON files.
@@ -97,11 +97,11 @@ func sendCommandHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Command sent successfully"))
 }
 
-// listAddonsHandler lists directories in the behavior and resource packs directories.
+// listAddonsHandler lists directories in the behaviour and resource packs directories.
 func listAddonsHandler(w http.ResponseWriter, r *http.Request) {
-	behaviorAddons, err := listDirectories(behaviorPacksDir)
+	behaviourAddons, err := listDirectories(behaviourPacksDir)
 	if err != nil {
-		http.Error(w, "Failed to list behavior packs", http.StatusInternalServerError)
+		http.Error(w, "Failed to list behaviour packs", http.StatusInternalServerError)
 		return
 	}
 	resourceAddons, err := listDirectories(resourcePacksDir)
@@ -110,8 +110,8 @@ func listAddonsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := map[string][]string{
-		"behavior_packs": behaviorAddons,
-		"resource_packs": resourceAddons,
+		"behaviour_packs": behaviourAddons,
+		"resource_packs":  resourceAddons,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -132,7 +132,7 @@ func listDirectories(dir string) ([]string, error) {
 }
 
 // uploadMcAddonHandler accepts an mcaddon file upload, extracts it,
-// and copies the behavior and resource packs to the appropriate folders.
+// and copies the behaviour and resource packs to the appropriate folders.
 func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -224,15 +224,15 @@ func uploadMcAddonHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Assume the extracted archive contains two folders at its root: "behavior" and "resource".
-	behaviorSrc := filepath.Join(extractDir, "behavior")
+	// Assume the extracted archive contains two folders at its root: "behaviour" and "resource".
+	behaviourSrc := filepath.Join(extractDir, "behaviour")
 	resourceSrc := filepath.Join(extractDir, "resource")
 
-	if dirExists(behaviorSrc) {
-		err = copyDir(behaviorSrc, behaviorPacksDir)
+	if dirExists(behaviourSrc) {
+		err = copyDir(behaviourSrc, behaviourPacksDir)
 		if err != nil {
-			log.Printf("Error copying behavior pack: %v", err)
-			http.Error(w, "Failed to install behavior pack", http.StatusInternalServerError)
+			log.Printf("Error copying behaviour pack: %v", err)
+			http.Error(w, "Failed to install behaviour pack", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -310,6 +310,7 @@ func getActiveAddons(jsonPath, packDir string) ([]ActiveAddon, error) {
 
 // activeAddonsHandler reads the active addons JSON files from the world folder,
 // then checks for matching addon directories in the corresponding packs directories.
+// If either JSON file is missing, it returns a 404.
 func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	worldFolder, err := getWorldFolder()
 	if err != nil {
@@ -317,13 +318,23 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error determining world folder", http.StatusInternalServerError)
 		return
 	}
-	behaviorJSON := filepath.Join(worldFolder, "world_behavior_packs.json")
+
+	behaviourJSON := filepath.Join(worldFolder, "world_behaviour_packs.json")
 	resourceJSON := filepath.Join(worldFolder, "world_resource_packs.json")
 
-	behaviorAddons, err := getActiveAddons(behaviorJSON, behaviorPacksDir)
+	if _, err := os.Stat(behaviourJSON); os.IsNotExist(err) {
+		http.Error(w, "world_behaviour_packs.json not found", http.StatusNotFound)
+		return
+	}
+	if _, err := os.Stat(resourceJSON); os.IsNotExist(err) {
+		http.Error(w, "world_resource_packs.json not found", http.StatusNotFound)
+		return
+	}
+
+	behaviourAddons, err := getActiveAddons(behaviourJSON, behaviourPacksDir)
 	if err != nil {
-		log.Printf("Error reading active behavior addons: %v", err)
-		http.Error(w, "Error reading active behavior addons", http.StatusInternalServerError)
+		log.Printf("Error reading active behaviour addons: %v", err)
+		http.Error(w, "Error reading active behaviour addons", http.StatusInternalServerError)
 		return
 	}
 	resourceAddons, err := getActiveAddons(resourceJSON, resourcePacksDir)
@@ -334,8 +345,8 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]interface{}{
-		"active_behavior_addons": behaviorAddons,
-		"active_resource_addons": resourceAddons,
+		"active_behaviour_addons": behaviourAddons,
+		"active_resource_addons":  resourceAddons,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
