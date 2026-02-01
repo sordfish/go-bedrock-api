@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -17,7 +19,6 @@ const (
 	behaviorPacksDir             = "/data/behavior_packs"
 	resourcePacksDir             = "/data/resource_packs"
 	serverPropsPath              = "/data/server.properties"
-	packArchiveDir               = "/data/pack_archives"
 	behaviorPackArchiveDir       = "/data/pack_archives/behavior"
 	resourcePackArchiveDir       = "/data/pack_archives/resource"
 	maxUploadSize          int64 = 10 << 20 // 10 MB
@@ -39,6 +40,28 @@ type ManifestHeader struct {
 type Manifest struct {
 	Header ManifestHeader `json:"header"`
 }
+
+// CustomCommand represents a custom command stored in memory
+type CustomCommand struct {
+	Name        string    `json:"name"`
+	Command     string    `json:"command"`
+	CreatedAt   time.Time `json:"created_at"`
+	ExecutedAt  time.Time `json:"executed_at,omitempty"`
+}
+
+// PlayerCoords represents a player's current coordinates
+type PlayerCoords struct {
+	Name string `json:"name"`
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
+	Z    float64 `json:"z"`
+}
+
+// Global state for custom commands
+var (
+	customCommands = make([]CustomCommand, 0)
+	commandsMutex  sync.RWMutex
+)
 
 // writeJSONError sends an error response in JSON format.
 func writeJSONError(w http.ResponseWriter, code int, message string) {
@@ -84,9 +107,6 @@ func getWorldFolder() (string, error) {
 
 // ensureArchiveDirectories creates the archive directory structure
 func ensureArchiveDirectories() error {
-	if err := os.MkdirAll(packArchiveDir, 0755); err != nil {
-		return fmt.Errorf("failed to create archive directory %s: %w", packArchiveDir, err)
-	}
 	dirs := []string{behaviorPackArchiveDir, resourcePackArchiveDir}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -738,6 +758,501 @@ func activeAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusOK, result)
 }
 
+// uiHandler serves the web UI
+func uiHandler(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bedrock Server Control Panel</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+        }
+        .card {
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            border: none;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px 10px 0 0;
+            font-weight: bold;
+        }
+        .btn {
+            border-radius: 5px;
+            font-weight: 500;
+            margin: 5px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+        }
+        .btn-primary:hover {
+            background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        }
+        .player-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 5px 0;
+            font-family: monospace;
+        }
+        .command-item {
+            background: #e7f3ff;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 5px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .status-online { color: #28a745; font-weight: bold; }
+        .status-offline { color: #dc3545; font-weight: bold; }
+        h1 {
+            color: white;
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 Bedrock Server Control Panel</h1>
+        
+        <div class="row">
+            <!-- Player Coordinates -->
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        📍 Live Player Coordinates
+                    </div>
+                    <div class="card-body">
+                        <div id="playersList">Loading players...</div>
+                        <button class="btn btn-primary btn-sm mt-2" onclick="refreshPlayers()">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Custom Commands -->
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        ⚙️ Custom Commands
+                    </div>
+                    <div class="card-body">
+                        <div class="input-group mb-2">
+                            <input type="text" id="commandName" class="form-control" placeholder="Command name">
+                            <input type="text" id="commandText" class="form-control" placeholder="Command text">
+                            <button class="btn btn-success" onclick="addCustomCommand()">Add</button>
+                        </div>
+                        <div id="customCommandsList"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Time & Weather Controls -->
+        <div class="card">
+            <div class="card-header">⏰ Time & Weather Controls</div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('time set day')">🌅 Set Day</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('time set night')">🌙 Set Night</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('weather clear')">☀️ Clear Weather</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('weather rain')">🌧️ Rain</button>
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('weather thunder')">⛈️ Thunder</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('gamerule showcoordinates true')">📍 Show Coords</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('gamerule showcoordinates false')">🚫 Hide Coords</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('gamerule dayCount 0')">Reset Day Count</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Player Mode Controls -->
+        <div class="card">
+            <div class="card-header">👤 Player Mode Controls</div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <button class="btn btn-success w-100" onclick="executeCommand('gamemode s @a')">🎮 Survival</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-success w-100" onclick="executeCommand('gamemode c @a')">🔨 Creative</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('gamemode a @a')">👻 Adventure</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-danger w-100" onclick="executeCommand('gamemode sp @a')">📖 Spectator</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Item & Armor Distribution -->
+        <div class="card">
+            <div class="card-header">🎁 Items & Armor</div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <button class="btn btn-secondary w-100" onclick="executeCommand('give @a diamond_pickaxe')">⛏️ Diamond Pickaxe</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-secondary w-100" onclick="executeCommand('give @a diamond_armor')">🛡️ Diamond Armor</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-secondary w-100" onclick="executeCommand('give @a diamond_sword')">⚔️ Diamond Sword</button>
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-4">
+                        <button class="btn btn-secondary w-100" onclick="executeCommand('give @a golden_apple 64')">🍎 Golden Apples</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-secondary w-100" onclick="executeCommand('give @a netherite_pickaxe')">💎 Netherite Pickaxe</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-secondary w-100" onclick="executeCommand('give @a shield')">🛡️ Shield</button>
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-6">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('give @a enchanted_golden_apple')">✨ Enchanted Golden Apple</button>
+                    </div>
+                    <div class="col-md-6">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('effect @a instant_health 1 10')">❤️ Instant Health</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Explosion & Effects -->
+        <div class="card">
+            <div class="card-header">💥 Explosions & Effects</div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <button class="btn btn-danger w-100" onclick="executeCommand('summon tnt ~ ~ ~')">💣 Spawn TNT</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-danger w-100" onclick="executeCommand('summon tnt ~ ~ ~ {Fuse: 0}')">💥 Instant TNT</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-danger w-100" onclick="executeCommand('summon creeper ~ ~ ~ {Fuse: 0}')">👹 Creeper Boom</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('effect @a wither 10 1')">☠️ Wither Effect</button>
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('summon fireworks_rocket ~ ~ ~')">🎆 Fireworks</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('effect @a levitation 5 1')">🎈 Levitation</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('effect @a speed 30 2')">💨 Speed Boost</button>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-info w-100" onclick="executeCommand('effect @a invisibility 60')">👻 Invisibility</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Utility & Admin -->
+        <div class="card">
+            <div class="card-header">🔧 Utility & Admin</div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('fill ~ ~ ~ ~100 ~100 ~100 air')">💨 Clear Area</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('kill @a')">💀 Kill All Players</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-warning w-100" onclick="executeCommand('say Server Message Test')">📣 Say Message</button>
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-4">
+                        <button class="btn btn-info w-100" onclick="executeCommand('gamerule pvp true')">⚔️ Enable PvP</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-info w-100" onclick="executeCommand('gamerule pvp false')">🚫 Disable PvP</button>
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-info w-100" onclick="executeCommand('gamerule naturalRegeneration true')">❤️ Enable Regen</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Response Display -->
+        <div class="card">
+            <div class="card-header">📊 Command Response</div>
+            <div class="card-body">
+                <div id="response" style="background: #f8f9fa; padding: 10px; border-radius: 5px; font-family: monospace; min-height: 50px;">
+                    Ready...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        async function executeCommand(command) {
+            try {
+                const response = await fetch('/send-command', {
+                    method: 'POST',
+                    body: command
+                });
+                const data = await response.json();
+                document.getElementById('response').innerText = new Date().toLocaleTimeString() + ' - ' + JSON.stringify(data);
+            } catch (error) {
+                document.getElementById('response').innerText = 'Error: ' + error.message;
+            }
+        }
+
+        async function refreshPlayers() {
+            try {
+                const response = await fetch('/player-coords');
+                const data = await response.json();
+                let html = '';
+                if (data.players && data.players.length > 0) {
+                    data.players.forEach(player => {
+                        html += '<div class="player-item">';
+                        html += '<strong>' + player.name + '</strong><br>';
+                        html += 'X: ' + player.x.toFixed(2) + ' Y: ' + player.y.toFixed(2) + ' Z: ' + player.z.toFixed(2);
+                        html += '</div>';
+                    });
+                } else {
+                    html = '<div class="text-muted">No players online or unable to fetch coordinates</div>';
+                }
+                document.getElementById('playersList').innerHTML = html;
+            } catch (error) {
+                document.getElementById('playersList').innerHTML = '<div class="text-danger">Error: ' + error.message + '</div>';
+            }
+        }
+
+        async function addCustomCommand() {
+            const name = document.getElementById('commandName').value;
+            const command = document.getElementById('commandText').value;
+            
+            if (!name || !command) {
+                alert('Please enter both name and command');
+                return;
+            }
+
+            try {
+                const response = await fetch('/add-custom-command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, command: command })
+                });
+                const data = await response.json();
+                document.getElementById('commandName').value = '';
+                document.getElementById('commandText').value = '';
+                loadCustomCommands();
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function loadCustomCommands() {
+            try {
+                const response = await fetch('/get-custom-commands');
+                const data = await response.json();
+                let html = '';
+                if (data.commands && data.commands.length > 0) {
+                    data.commands.forEach((cmd, index) => {
+                        html += '<div class="command-item">';
+                        html += '<div><strong>' + cmd.name + '</strong><br><small>' + cmd.command + '</small></div>';
+                        html += '<button class="btn btn-sm btn-primary" onclick="executeCustom(' + index + ')">Run</button>';
+                        html += '<button class="btn btn-sm btn-danger" onclick="deleteCustom(' + index + ')">Del</button>';
+                        html += '</div>';
+                    });
+                } else {
+                    html = '<div class="text-muted">No custom commands yet</div>';
+                }
+                document.getElementById('customCommandsList').innerHTML = html;
+            } catch (error) {
+                console.error('Error loading custom commands:', error);
+            }
+        }
+
+        async function executeCustom(index) {
+            try {
+                const response = await fetch('/execute-custom-command/' + index, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                document.getElementById('response').innerText = new Date().toLocaleTimeString() + ' - ' + JSON.stringify(data);
+            } catch (error) {
+                document.getElementById('response').innerText = 'Error: ' + error.message;
+            }
+        }
+
+        async function deleteCustom(index) {
+            try {
+                await fetch('/delete-custom-command/' + index, {
+                    method: 'POST'
+                });
+                loadCustomCommands();
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // Auto-refresh players every 5 seconds
+        setInterval(refreshPlayers, 5000);
+        refreshPlayers();
+        loadCustomCommands();
+    </script>
+</body>
+</html>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, html)
+}
+
+// playerCoordsHandler returns approximate player coordinates (simulated)
+func playerCoordsHandler(w http.ResponseWriter, r *http.Request) {
+	// In a real implementation, you'd read this from world data
+	// For now, return mock data
+	players := []PlayerCoords{
+		{Name: "Player1", X: 100.5, Y: 64.0, Z: -50.3},
+		{Name: "Player2", X: 200.2, Y: 72.5, Z: 150.8},
+	}
+	writeJSONResponse(w, http.StatusOK, map[string]interface{}{"players": players})
+}
+
+// addCustomCommandHandler adds a custom command
+func addCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+		return
+	}
+	var req CustomCommand
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid request")
+		return
+	}
+	req.CreatedAt = time.Now()
+	
+	commandsMutex.Lock()
+	customCommands = append(customCommands, req)
+	commandsMutex.Unlock()
+	
+	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Custom command added"})
+}
+
+// getCustomCommandsHandler returns all custom commands
+func getCustomCommandsHandler(w http.ResponseWriter, r *http.Request) {
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+	
+	writeJSONResponse(w, http.StatusOK, map[string]interface{}{"commands": customCommands})
+}
+
+// executeCustomCommandHandler executes a custom command by index
+func executeCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+		return
+	}
+	
+	indexStr := strings.TrimPrefix(r.URL.Path, "/execute-custom-command/")
+	var index int
+	if _, err := fmt.Sscanf(indexStr, "%d", &index); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid index")
+		return
+	}
+	
+	commandsMutex.Lock()
+	if index < 0 || index >= len(customCommands) {
+		commandsMutex.Unlock()
+		writeJSONError(w, http.StatusNotFound, "Command not found")
+		return
+	}
+	customCommands[index].ExecutedAt = time.Now()
+	cmd := customCommands[index]
+	commandsMutex.Unlock()
+	
+	// Execute the command
+	fifo, err := os.OpenFile(fifoPath, os.O_WRONLY, 0)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Failed to execute command")
+		return
+	}
+	defer fifo.Close()
+	
+	_, err = fifo.Write([]byte(cmd.Command + "\n"))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Failed to execute command")
+		return
+	}
+	
+	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Custom command executed: " + cmd.Command})
+}
+
+// deleteCustomCommandHandler deletes a custom command by index
+func deleteCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+		return
+	}
+	
+	indexStr := strings.TrimPrefix(r.URL.Path, "/delete-custom-command/")
+	var index int
+	if _, err := fmt.Sscanf(indexStr, "%d", &index); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid index")
+		return
+	}
+	
+	commandsMutex.Lock()
+	if index < 0 || index >= len(customCommands) {
+		commandsMutex.Unlock()
+		writeJSONError(w, http.StatusNotFound, "Command not found")
+		return
+	}
+	customCommands = append(customCommands[:index], customCommands[index+1:]...)
+	commandsMutex.Unlock()
+	
+	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Custom command deleted"})
+}
+
 func main() {
 	// Initialize archive directories
 	if err := ensureArchiveDirectories(); err != nil {
@@ -749,13 +1264,20 @@ func main() {
 		log.Printf("Error during pack restoration: %v", err)
 	}
 
+	http.HandleFunc("/", uiHandler)
 	http.HandleFunc("/send-command", sendCommandHandler)
 	http.HandleFunc("/list-addons", listAddonsHandler)
 	http.HandleFunc("/upload-mcaddon", uploadMcAddonHandler)
 	http.HandleFunc("/active-addons", activeAddonsHandler)
+	http.HandleFunc("/player-coords", playerCoordsHandler)
+	http.HandleFunc("/add-custom-command", addCustomCommandHandler)
+	http.HandleFunc("/get-custom-commands", getCustomCommandsHandler)
+	http.HandleFunc("/execute-custom-command/", executeCustomCommandHandler)
+	http.HandleFunc("/delete-custom-command/", deleteCustomCommandHandler)
 
 	port := "8080"
 	log.Printf("Starting sidecar command server on port %s...", port)
+	log.Printf("Web UI available at http://localhost:%s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
