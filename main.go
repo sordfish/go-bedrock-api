@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,15 +44,23 @@ type Manifest struct {
 
 // CustomCommand represents a custom command stored in memory
 type CustomCommand struct {
-	Name        string    `json:"name"`
-	Command     string    `json:"command"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExecutedAt  time.Time `json:"executed_at,omitempty"`
+	Name       string    `json:"name"`
+	Command    string    `json:"command"`
+	CreatedAt  time.Time `json:"created_at"`
+	ExecutedAt time.Time `json:"executed_at,omitempty"`
 }
 
 // PlayerCoords represents a player's current coordinates
 type PlayerCoords struct {
-	Name string `json:"name"`
+	Name string  `json:"name"`
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
+	Z    float64 `json:"z"`
+}
+
+// SpawnPoint represents a predefined spawn location
+type SpawnPoint struct {
+	Name string  `json:"name"`
 	X    float64 `json:"x"`
 	Y    float64 `json:"y"`
 	Z    float64 `json:"z"`
@@ -61,6 +70,9 @@ type PlayerCoords struct {
 var (
 	customCommands = make([]CustomCommand, 0)
 	commandsMutex  sync.RWMutex
+	// Spawn points stored in memory
+	spawnPoints = make([]SpawnPoint, 0)
+	spawnMutex  sync.RWMutex
 )
 
 // writeJSONError sends an error response in JSON format.
@@ -861,9 +873,20 @@ func uiHandler(w http.ResponseWriter, r *http.Request) {
                     </div>
                 </div>
             </div>
-        </div>
+		</div>
 
-        <!-- Time & Weather Controls -->
+		<!-- Spawn Points -->
+		<div class="card">
+			<div class="card-header">📍 Spawn Points</div>
+			<div class="card-body">
+				<div id="spawnPointsList">Loading spawn points...</div>
+				<div class="mt-2">
+					<button class="btn btn-secondary" onclick="loadSpawnPoints()">Refresh Spawn Points</button>
+				</div>
+			</div>
+		</div>
+
+		<!-- Time & Weather Controls -->
         <div class="card">
             <div class="card-header">⏰ Time & Weather Controls</div>
             <div class="card-body">
@@ -1113,6 +1136,39 @@ func uiHandler(w http.ResponseWriter, r *http.Request) {
             }
         }
 
+		async function loadSpawnPoints() {
+			try {
+				const resp = await fetch('/spawn-points');
+				const data = await resp.json();
+				let html = '';
+				if (data.spawn_points && data.spawn_points.length > 0) {
+					data.spawn_points.forEach((sp, idx) => {
+						html += '<div class="command-item">';
+						html += '<div><strong>' + sp.name + '</strong><br><small>X:' + sp.x.toFixed(2) + ' Y:' + sp.y.toFixed(2) + ' Z:' + sp.z.toFixed(2) + '</small></div>';
+						html += '<div>';
+						html += '<button class="btn btn-sm btn-primary" onclick="executeTeleportSpawn(' + idx + ')">Teleport All</button>';
+						html += '</div>';
+						html += '</div>';
+					});
+				} else {
+					html = '<div class="text-muted">No spawn points</div>';
+				}
+				document.getElementById('spawnPointsList').innerHTML = html;
+			} catch (error) {
+				document.getElementById('spawnPointsList').innerHTML = '<div class="text-danger">Error: ' + error.message + '</div>';
+			}
+		}
+
+		async function executeTeleportSpawn(index) {
+			try {
+				const resp = await fetch('/teleport-to-spawn/' + index, { method: 'POST' });
+				const data = await resp.json();
+				document.getElementById('response').innerText = new Date().toLocaleTimeString() + ' - ' + JSON.stringify(data);
+			} catch (error) {
+				document.getElementById('response').innerText = 'Error: ' + error.message;
+			}
+		}
+
         async function executeCustom(index) {
             try {
                 const response = await fetch('/execute-custom-command/' + index, {
@@ -1140,6 +1196,7 @@ func uiHandler(w http.ResponseWriter, r *http.Request) {
         setInterval(refreshPlayers, 5000);
         refreshPlayers();
         loadCustomCommands();
+		loadSpawnPoints();
     </script>
 </body>
 </html>`
@@ -1170,11 +1227,11 @@ func addCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CreatedAt = time.Now()
-	
+
 	commandsMutex.Lock()
 	customCommands = append(customCommands, req)
 	commandsMutex.Unlock()
-	
+
 	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Custom command added"})
 }
 
@@ -1182,7 +1239,7 @@ func addCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 func getCustomCommandsHandler(w http.ResponseWriter, r *http.Request) {
 	commandsMutex.RLock()
 	defer commandsMutex.RUnlock()
-	
+
 	writeJSONResponse(w, http.StatusOK, map[string]interface{}{"commands": customCommands})
 }
 
@@ -1192,14 +1249,14 @@ func executeCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
-	
+
 	indexStr := strings.TrimPrefix(r.URL.Path, "/execute-custom-command/")
 	var index int
 	if _, err := fmt.Sscanf(indexStr, "%d", &index); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "Invalid index")
 		return
 	}
-	
+
 	commandsMutex.Lock()
 	if index < 0 || index >= len(customCommands) {
 		commandsMutex.Unlock()
@@ -1209,7 +1266,7 @@ func executeCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 	customCommands[index].ExecutedAt = time.Now()
 	cmd := customCommands[index]
 	commandsMutex.Unlock()
-	
+
 	// Execute the command
 	fifo, err := os.OpenFile(fifoPath, os.O_WRONLY, 0)
 	if err != nil {
@@ -1217,13 +1274,13 @@ func executeCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer fifo.Close()
-	
+
 	_, err = fifo.Write([]byte(cmd.Command + "\n"))
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "Failed to execute command")
 		return
 	}
-	
+
 	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Custom command executed: " + cmd.Command})
 }
 
@@ -1233,14 +1290,14 @@ func deleteCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
 		return
 	}
-	
+
 	indexStr := strings.TrimPrefix(r.URL.Path, "/delete-custom-command/")
 	var index int
 	if _, err := fmt.Sscanf(indexStr, "%d", &index); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "Invalid index")
 		return
 	}
-	
+
 	commandsMutex.Lock()
 	if index < 0 || index >= len(customCommands) {
 		commandsMutex.Unlock()
@@ -1249,8 +1306,71 @@ func deleteCustomCommandHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	customCommands = append(customCommands[:index], customCommands[index+1:]...)
 	commandsMutex.Unlock()
-	
+
 	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Custom command deleted"})
+}
+
+// generateSpawnPoints creates n random spawn points (in-memory)
+func generateSpawnPoints(n int) {
+	rand.Seed(time.Now().UnixNano())
+	spawnMutex.Lock()
+	defer spawnMutex.Unlock()
+	spawnPoints = make([]SpawnPoint, 0, n)
+	for i := 0; i < n; i++ {
+		x := float64(rand.Intn(1000) - 500)
+		z := float64(rand.Intn(1000) - 500)
+		y := 64.0 + float64(rand.Intn(16))
+		sp := SpawnPoint{
+			Name: fmt.Sprintf("Spawn %d", i+1),
+			X:    x,
+			Y:    y,
+			Z:    z,
+		}
+		spawnPoints = append(spawnPoints, sp)
+	}
+}
+
+// spawnPointsHandler returns the list of spawn points
+func spawnPointsHandler(w http.ResponseWriter, r *http.Request) {
+	spawnMutex.RLock()
+	defer spawnMutex.RUnlock()
+	writeJSONResponse(w, http.StatusOK, map[string]interface{}{"spawn_points": spawnPoints})
+}
+
+// teleportToSpawnHandler teleports all players to the selected spawn point index
+func teleportToSpawnHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+		return
+	}
+	indexStr := strings.TrimPrefix(r.URL.Path, "/teleport-to-spawn/")
+	var idx int
+	if _, err := fmt.Sscanf(indexStr, "%d", &idx); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Invalid index")
+		return
+	}
+	spawnMutex.RLock()
+	if idx < 0 || idx >= len(spawnPoints) {
+		spawnMutex.RUnlock()
+		writeJSONError(w, http.StatusNotFound, "Spawn point not found")
+		return
+	}
+	sp := spawnPoints[idx]
+	spawnMutex.RUnlock()
+
+	// Construct teleport command for all players
+	cmd := fmt.Sprintf("tp @a %.2f %.2f %.2f", sp.X, sp.Y, sp.Z)
+	fifo, err := os.OpenFile(fifoPath, os.O_WRONLY, 0)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Failed to open FIFO")
+		return
+	}
+	defer fifo.Close()
+	if _, err := fifo.Write([]byte(cmd + "\n")); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Failed to write to FIFO")
+		return
+	}
+	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Teleported to spawn", "command": cmd})
 }
 
 func main() {
@@ -1264,6 +1384,9 @@ func main() {
 		log.Printf("Error during pack restoration: %v", err)
 	}
 
+	// Generate some spawn points on boot
+	generateSpawnPoints(5)
+
 	http.HandleFunc("/", uiHandler)
 	http.HandleFunc("/send-command", sendCommandHandler)
 	http.HandleFunc("/list-addons", listAddonsHandler)
@@ -1274,6 +1397,8 @@ func main() {
 	http.HandleFunc("/get-custom-commands", getCustomCommandsHandler)
 	http.HandleFunc("/execute-custom-command/", executeCustomCommandHandler)
 	http.HandleFunc("/delete-custom-command/", deleteCustomCommandHandler)
+	http.HandleFunc("/spawn-points", spawnPointsHandler)
+	http.HandleFunc("/teleport-to-spawn/", teleportToSpawnHandler)
 
 	port := "8080"
 	log.Printf("Starting sidecar command server on port %s...", port)
